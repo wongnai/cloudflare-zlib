@@ -1,26 +1,21 @@
-// +build cgo,amd64
+// +build amd64
 
 package zlib
-
-/*
-
-#cgo CFLAGS: -march=ivybridge -std=c99 -Wall -D_LARGEFILE64_SOURCE=1 -DHAVE_HIDDEN -DHAVE_INTERNAL -DHAVE_BUILTIN_CTZL -DMEDIUM_STRATEGY -DX86_64 -DX86_NOCHECK_SSE2 -DUNALIGNED_OK -DUNROLL_LESS -DX86_CPUID -DX86_SSE2_FILL_WINDOW -DX86_SSE4_2_CRC_HASH -DX86_SSE4_2_CRC_INTRIN -DX86_PCLMULQDQ_CRC -DX86_QUICK_STRATEGY -I.
-
-#include <errno.h>
-#include "./zlib.h"
-#include "./zstream.h"
-
-*/
-import "C"
 
 import (
 	"errors"
 	"fmt"
-	"io"
-	"unsafe"
-
 	"golang.org/x/sys/unix"
+	"io"
+	"runtime"
+	"unsafe"
 )
+
+// #cgo LDFLAGS: -lz
+// #include <errno.h>
+// #include <zlib.h>
+// #include "./zstream.h"
+import "C"
 
 type zstream [unsafe.Sizeof(C.z_stream{})]C.char
 
@@ -116,6 +111,13 @@ func (z *reader) Read(out []byte) (int, error) {
 	return len(orgOut) - len(out), z.err
 }
 
+type Writer interface {
+	Close() error
+	Flush() error
+	Write([]byte) (int, error)
+	Reset(io.Writer) error
+}
+
 type writer struct {
 	out    io.Writer
 	zs     zstream // underlying zlib implementation.
@@ -124,14 +126,14 @@ type writer struct {
 }
 
 // NewWriter creates a gzip writer with default settings.
-func NewWriter(w io.Writer) (io.WriteCloser, error) {
+func NewWriter(w io.Writer) (Writer, error) {
 	return NewWriterLevel(w, -1, defaultBufferSize)
 }
 
 // NewWriterLevel creates a gzip writer. Level is the compression level; -1
 // means the default level. bufSize is the internal buffer size. It defaults to
 // 512KB.
-func NewWriterLevel(w io.Writer, level int, bufSize int) (io.WriteCloser, error) {
+func NewWriterLevel(w io.Writer, level int, bufSize int) (Writer, error) {
 	z := &writer{
 		out:    w,
 		outBuf: make([]byte, bufSize),
@@ -140,7 +142,12 @@ func NewWriterLevel(w io.Writer, level int, bufSize int) (io.WriteCloser, error)
 	if ec != 0 {
 		return nil, zlibReturnCodeToError(ec)
 	}
+	runtime.SetFinalizer(z, gcWriter)
 	return z, nil
+}
+
+func gcWriter(z *writer) {
+	C.zs_deflate_end(&z.zs[0])
 }
 
 func (z *writer) push(data []byte) error {
@@ -158,7 +165,7 @@ func (z *writer) push(data []byte) error {
 func (z *writer) Close() error {
 	for {
 		outLen := C.int(len(z.outBuf))
-		ret := C.zs_deflate_end(&z.zs[0], unsafe.Pointer(&z.outBuf[0]), &outLen)
+		ret := C.zs_deflate_finish(&z.zs[0], unsafe.Pointer(&z.outBuf[0]), &outLen)
 		if ret != 0 && ret != C.Z_STREAM_END {
 			return zlibReturnCodeToError(ret)
 		}
@@ -207,15 +214,43 @@ func (z *writer) Write(in []byte) (int, error) {
 	return len(in), nil
 }
 
+func (z *writer) Flush() error {
+	outLen := C.int(len(z.outBuf))
+	ret := C.zs_deflate_flush(&z.zs[0], unsafe.Pointer(&z.outBuf[0]), &outLen)
+	if ret == C.Z_BUF_ERROR {
+		// no output
+		return nil
+	}
+	if ret != 0 {
+		return zlibReturnCodeToError(ret)
+	}
+	nOut := len(z.outBuf) - int(outLen)
+	if err := z.push(z.outBuf[:nOut]); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (z *writer) Reset(w io.Writer) error {
+	ret := C.zs_deflate_reset(&z.zs[0])
+	if ret != C.Z_OK {
+		return zlibReturnCodeToError(ret)
+	}
+
+	z.out = w
+
+	return nil
+}
+
 var zlibErrors = map[C.int]error{
 	C.Z_OK:            nil,
 	C.Z_STREAM_END:    io.EOF,
 	C.Z_ERRNO:         nil, // handled separately
-	C.Z_STREAM_ERROR:  errors.New("Zlib: stream error"),
-	C.Z_DATA_ERROR:    errors.New("Zlib: data error"),
-	C.Z_MEM_ERROR:     errors.New("Zlib: mem error"),
-	C.Z_BUF_ERROR:     errors.New("Zlib: buf error"),
-	C.Z_VERSION_ERROR: errors.New("Zlib: version error"),
+	C.Z_STREAM_ERROR:  errors.New("zlib: stream error"),
+	C.Z_DATA_ERROR:    errors.New("zlib: data error"),
+	C.Z_MEM_ERROR:     errors.New("zlib: mem error"),
+	C.Z_BUF_ERROR:     errors.New("zlib: buf error"),
+	C.Z_VERSION_ERROR: errors.New("zlib: version error"),
 }
 
 func zlibReturnCodeToError(r C.int) error {
@@ -228,5 +263,9 @@ func zlibReturnCodeToError(r C.int) error {
 	if err, ok := zlibErrors[r]; ok {
 		return err
 	}
-	return fmt.Errorf("Zlib: unknown error %d", r)
+	return fmt.Errorf("zlib: unknown error %d", r)
+}
+
+func Version() string {
+	return C.GoString(C.zlibVersion())
 }

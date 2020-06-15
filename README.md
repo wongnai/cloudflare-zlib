@@ -1,34 +1,33 @@
-[![GoDoc](https://godoc.org/github.com/yasushi-saito/cloudflare-zlib?status.svg)](https://godoc.org/github.com/yasushi-saito/cloudflare-zlib)
+Fork of https://github.com/yasushi-saito/cloudflare-zlib
 
+## Changes from upstream
 
-Go bindings for cloudflare zlib fork (https://github.com/cloudflare/zlib).
+- Remove inlined zlib
+  - You should install zlib yourself
+  - From brief testing it should be compatible with normal zlib as well.
+- Added Flush method
+- Added Version method
+- Added Reset method
+  - To accommodate this change, the Close method no longer call deflateEnd. Instead, it is done using finalizer. 
 
-## Status
+## Using this with cloudflare-zlib
 
-As of 2018-12-24
+This module *does not* ship with Cloudflare's implementation of zlib. Instead, it will link with any zlib you have installed.
 
-- Only tested for Linux amd64 + cgo.
-- You need to set
+To use it with cloudflare-zlib, you should install it
 
+**WARNING** This instruction is tested on Docker - it MAY or may not break your system if you replace the original zlib.
+
+```sh
+git clone https://github.com/cloudflare/zlib
+cd zlib
+CFLAGS="-march=native -mtune=native -O3" ./configure
+make
+cp libz.so* /usr/lib/
 ```
-export CGO_CFLAGS_ALLOW=-m.*
-```
 
-  before building.
+Then build your app accordingly:
 
-
-## Benchmark
-
-As of 2018-12-24.
-
-File: 240MB text file.
-The file is compressed 5.2x using any of the systems tested.
-
-```
-BenchmarkInflateStandardGzip-8     	     100	  18325651 ns/op
-BenchmarkInflateKlauspostGzip-8    	     100	  21908492 ns/op
-BenchmarkInflateCloudflareGzip-8   	     200	   7312906 ns/op
-BenchmarkDeflateStandardGzip-8     	       1	11806820047 ns/op
-BenchmarkDeflateKlauspostGzip-8    	       1	3039031194 ns/op
-BenchmarkDeflateCloudflareGzip-8   	       1	3033015128 ns/op
+```sh
+CGO_CFLAGS="-I/path/to/zlib" CGO_LDFLAGS="-I/path/to/zlib -lz" go build ./...
 ```

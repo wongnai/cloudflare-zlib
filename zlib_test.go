@@ -13,9 +13,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	zlib "github.com/wongnai/cloudflare-zlib"
 	"github.com/grailbio/testutil/assert"
-	kgzip "github.com/klauspost/compress/gzip"
-	zlib "github.com/yasushi-saito/cloudflare-zlib"
 )
 
 func testInflate(t *testing.T, r *rand.Rand, src []byte, want []byte) {
@@ -54,7 +53,7 @@ func testInflate(t *testing.T, r *rand.Rand, src []byte, want []byte) {
 func TestInflateRandom(t *testing.T) {
 	r := rand.New(rand.NewSource(0))
 	for i := 0; i < 20; i++ {
-		n := r.Intn(16 << 20) + 1
+		n := r.Intn(16<<20) + 1
 		log.Printf("%d: n=%d", i, n)
 		uncompressed := make([]byte, n)
 		_, err := r.Read(uncompressed)
@@ -78,7 +77,7 @@ func TestInflateRandomPacked(t *testing.T) {
 
 		log.Printf("%d", i)
 		for j := 0; j < 10; j++ {
-			n := r.Intn(2 << 20) + 1
+			n := r.Intn(2<<20) + 1
 			buf := make([]byte, n)
 			_, err := r.Read(buf)
 			assert.NoError(t, err)
@@ -131,6 +130,74 @@ func TestDeflateRandom(t *testing.T) {
 		_, err := r.Read(data)
 		assert.NoError(t, err)
 		testDeflate(t, r, data)
+	}
+}
+
+func TestDeflateFlush(t *testing.T) {
+	r := rand.New(rand.NewSource(0))
+	data := make([]byte, 16<<20)
+	_, err := r.Read(data)
+	assert.NoError(t, err)
+
+	writtenData := data
+	out := bytes.Buffer{}
+	zout, err := zlib.NewWriter(&out)
+	assert.NoError(t, err)
+
+	for len(writtenData) > 0 {
+		n := r.Intn(8192)
+		if n > len(writtenData) {
+			n = len(writtenData)
+		}
+		n2, err := zout.Write(writtenData[:n])
+		assert.NoError(t, err)
+		assert.EQ(t, n, n2)
+		writtenData = writtenData[n:]
+		assert.NoError(t, zout.Flush())
+	}
+	assert.NoError(t, zout.Close())
+
+	got := bytes.Buffer{}
+	zin, err := gzip.NewReader(bytes.NewReader(out.Bytes()))
+	assert.NoError(t, err)
+	n, err := io.Copy(&got, zin)
+	assert.NoError(t, err)
+	assert.EQ(t, int(n), len(data))
+	if !bytes.Equal(got.Bytes(), data) {
+		t.Fatal("fail")
+	}
+}
+
+func TestDeflateReset(t *testing.T) {
+	r := rand.New(rand.NewSource(0))
+	data := make([]byte, 16<<20)
+	_, err := r.Read(data)
+	assert.NoError(t, err)
+
+	out := bytes.Buffer{}
+	zout, err := zlib.NewWriter(&out)
+	assert.NoError(t, err)
+	_, err = zout.Write(data)
+	assert.NoError(t, err)
+	assert.NoError(t, zout.Close())
+
+	// Reset for second run
+	_, err = r.Read(data)
+	assert.NoError(t, err)
+	out = bytes.Buffer{}
+	assert.NoError(t, zout.Reset(&out))
+	_, err = zout.Write(data)
+	assert.NoError(t, err)
+	assert.NoError(t, zout.Close())
+
+	got := bytes.Buffer{}
+	zin, err := gzip.NewReader(bytes.NewReader(out.Bytes()))
+	assert.NoError(t, err)
+	n, err := io.Copy(&got, zin)
+	assert.NoError(t, err)
+	assert.EQ(t, int(n), len(data))
+	if !bytes.Equal(got.Bytes(), data) {
+		t.Fatal("fail")
 	}
 }
 
@@ -268,13 +335,6 @@ func BenchmarkInflateStandardGzip(b *testing.B) {
 		})
 }
 
-func BenchmarkInflateKlauspostGzip(b *testing.B) {
-	benchmarkInflate(b, "/tmp/get-pip.py",
-		func(in io.Reader) (io.Reader, error) {
-			return kgzip.NewReader(in)
-		})
-}
-
 func BenchmarkInflateZlib(b *testing.B) {
 	benchmarkInflate(b, "/tmp/get-pip.py",
 		func(in io.Reader) (io.Reader, error) {
@@ -312,15 +372,6 @@ func BenchmarkDeflateStandardGzip(b *testing.B) {
 	benchmarkDeflate(b, *testPathFlag,
 		func(out io.Writer) io.WriteCloser {
 			w, err := gzip.NewWriterLevel(out, 5)
-			assert.NoError(b, err)
-			return w
-		})
-}
-
-func BenchmarkDeflateKlauspostGzip(b *testing.B) {
-	benchmarkDeflate(b, *testPathFlag,
-		func(out io.Writer) io.WriteCloser {
-			w, err := kgzip.NewWriterLevel(out, 5)
 			assert.NoError(b, err)
 			return w
 		})
